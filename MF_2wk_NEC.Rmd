@@ -1,0 +1,1648 @@
+---
+title: "MF_2wk_NEC"
+author: "ZZ"
+date: "2024-04-17"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "~/scRNA_coding")
+```
+
+Save objects:
+```{r}
+save(list = ls(all.names = TRUE), file = "new_my_workspace.RData")
+```
+
+Load in objects:
+```{r}
+load("new_my_workspace.RData")
+```
+
+Load packages:
+```{r}
+library("Seurat")
+library("SeuratDisk")
+library("tidyverse")
+library("ggplot2")
+library("harmony")
+library("pheatmap")
+```
+
+Set the seed for the purpose of reproducibility:
+```{r}
+set.seed(1234)
+```
+
+Load data:
+```{r}
+control_data <- c("~/scRNA_coding/ECZ-1_raw_feature_bc_matrix", "~/scRNA_coding/ECZ-2_raw_feature_bc_matrix",
+                  "~/scRNA_coding/ECZ-11_raw_feature_bc_matrix", "~/scRNA_coding/ECZ-12_raw_feature_bc_matrix")
+disease_data <- c("~/scRNA_coding/ECZ-3_raw_feature_bc_matrix", "~/scRNA_coding/ECZ-4_raw_feature_bc_matrix",
+                  "~/scRNA_coding/ECZ-5_raw_feature_bc_matrix", "~/scRNA_coding/ECZ-6_raw_feature_bc_matrix")
+```
+
+Read in data:
+```{r}
+control_counts <- lapply(control_data, Read10X)
+disease_counts <- lapply(disease_data, Read10X)
+```
+
+Create Seurat objects:
+```{r}
+control_obj <- lapply(seq_along(control_counts), function(i) {
+  obj <- CreateSeuratObject(counts = control_counts[[i]], project = "Control")
+  obj$sex <- ifelse(i %in% c(1, 2, 3), "F", "M")
+  obj
+})
+
+disease_obj <- lapply(seq_along(disease_counts), function(i) {
+  obj <- CreateSeuratObject(counts = disease_counts[[i]], project = "Disease")
+  obj$sex <- ifelse(i %in% c(2, 4), "F", "M")
+  obj
+})
+```
+
+Merge Seurat objects:
+```{r}
+merged_obj <- merge(x = control_obj[[1]], y = c(control_obj[-1], disease_obj))
+```
+
+```{r}
+# Print the counts of each unique value in the "sex" column
+print(table(merged_obj$sex))
+```
+
+
+Create 'stim' object in metadata:
+```{r}
+merged_obj$stim <- merged_obj$orig.ident
+```
+
+```{r}
+# Print the counts of each unique value in the "stim" column
+print(table(merged_obj$stim))
+```
+
+Basic QC and filtering:
+```{r}
+merged_obj$mito.percent <- PercentageFeatureSet(merged_obj, pattern = '^MT-')
+#View(merged_obj@meta.data)
+```
+
+```{r}
+filtered_merged_obj <- subset(merged_obj, subset = nCount_RNA > 800 &
+                       nFeature_RNA > 200 &
+                       mito.percent < 5)
+```
+
+```{r}
+filtered_merged_obj <- NormalizeData(filtered_merged_obj)
+filtered_merged_obj <- FindVariableFeatures(filtered_merged_obj)
+filtered_merged_obj <- ScaleData(filtered_merged_obj)
+filtered_merged_obj <- RunPCA(filtered_merged_obj) #linearity dimension reduction
+```
+
+View elbow plot:
+```{r}
+ElbowPlot(filtered_merged_obj) #first 10-15 have majority of the variation, but I think it's still wise to use all 20.
+```
+
+Run UMAP:
+```{r}
+filtered_merged_obj <- RunUMAP(filtered_merged_obj, dims = 1:20, reduction = 'pca')
+```
+
+Create dimensional plot:
+```{r}
+before <- DimPlot(filtered_merged_obj, reduction = "umap", group.by = "stim")
+before
+```
+
+```{r}
+merged_harmony <- filtered_merged_obj %>%
+  RunHarmony(group.by.vars = "stim", plot_convergence = FALSE)
+```
+
+```{r}
+merged_harmony@reductions
+```
+
+```{r}
+merged_harmony_embed <- Embeddings(merged_harmony, "harmony")
+merged_harmony_embed[1:10,1:10]
+```
+
+Do UMAP and clustering using with Harmony embeddings instead of PCA:
+```{r}
+merged_harmony <- merged_harmony %>%
+  RunUMAP(reduction = 'harmony', dims = 1:20) %>%
+  FindNeighbors(reduction = "harmony", dims = 1:20) %>%
+  FindClusters(resolution = 0.5)
+```
+
+Visualize:
+```{r}
+after <- DimPlot(merged_harmony, reduction = 'umap', group.by = 'stim')
+```
+
+```{r}
+before|after
+```
+
+```{r}
+View(merged_harmony@meta.data)
+```
+
+Group by clusters and condition:
+```{r}
+clusters <- DimPlot(merged_harmony, reduction = 'umap', group.by = 'seurat_clusters', label = TRUE)
+condition <- DimPlot(merged_harmony, reduction = 'umap', group.by = 'stim')
+```
+
+```{r}
+condition
+```
+
+
+```{r}
+clusters
+```
+
+
+```{r}
+merged_harmony <- JoinLayers(merged_harmony)
+```
+
+```{r}
+DefaultAssay(merged_harmony)
+```
+
+
+```{r}
+features <- c("Cldn5", "Pdgfrb", "Aldh1l1", "Cx3cr1")
+
+DotPlot(object = merged_harmony, features = features) + RotatedAxis()
+FeaturePlot(object = merged_harmony, features = features, label = TRUE, label.size = 5)
+```
+
+```{r}
+# Create a new object with labeled clusters
+clusters_labeled <- merged_harmony
+clusters_labeled <- RenameIdents(clusters_labeled, 
+                                 "8" = "Endothelial cells", "20" = "Endothelial cells", "29" = "Endothelial cells", "1" = "Endothelial cells",
+                                 "14" = "Pericytes",
+                                 "9" = "Astrocytes",
+                                 "11" = "Microglia", "22" = "Microglia")
+
+# Filter cells based on gene expression and identity
+clusters_labeled_nonzero <- subset(clusters_labeled, 
+                                   subset = (Idents(clusters_labeled) == "Endothelial cells" & Cldn5 > 0 & Ocln > 0) |
+                                            (Idents(clusters_labeled) == "Pericytes" & Pdgfrb > 0 & Rgs5 > 0) |
+                                            (Idents(clusters_labeled) == "Astrocytes" & Aldh1l1 > 0 & Gfap > 0) |
+                                            (Idents(clusters_labeled) == "Microglia" & Cx3cr1 > 0 & Aif1 > 0))
+
+# Visualize the updated clusters
+DimPlot(clusters_labeled_nonzero, reduction = 'umap', label = TRUE)
+```
+
+```{r}
+unique(clusters_labeled_nonzero@meta.data$stim)
+```
+
+Check that "sex" column is present in the metadata of the clusters_labeled_nonzero object
+```{r}
+# Check if the "sex" column is present in the metadata
+if ("sex" %in% colnames(clusters_labeled_nonzero@meta.data)) {
+  print("The 'sex' column is already present in the metadata.")
+} else {
+  print("The 'sex' column is not present in the metadata.")
+}
+
+# Print the first few rows of the metadata
+print(head(clusters_labeled_nonzero@meta.data))
+```
+
+Use FindMarkers for differential expression analysis. Consider sex as a confounding variable with latent.vars.
+```{r}
+# Define the cell types
+cell_types <- c("Endothelial cells", "Pericytes", "Astrocytes", "Microglia")
+
+# Initialize an empty list to store the FindMarkers results
+markers_list <- list()
+
+# Iterate over each cell type and run FindMarkers
+for (cell_type in cell_types) {
+  # Subset the data for the current cell type
+  subset_data <- subset(clusters_labeled_nonzero, idents = cell_type)
+  
+  # Find differentially expressed genes between Control and Disease, considering sex as a latent variable
+  # Only include genes expressed in at least 20% of the cells
+  markers <- FindMarkers(subset_data, group.by = "stim", ident.1 = "Control", ident.2 = "Disease",
+                         latent.vars = "sex", test.use = "wilcox", min.pct = 0.2)
+  
+  # Store the FindMarkers results for the current cell type
+  markers_list[[cell_type]] <- markers
+}
+
+```
+
+Creating tables of top DE genes
+```{r}
+# Initialize an empty list to store the top differentially expressed genes
+results <- list()
+
+# Iterate over each cell type
+for (cell_type in cell_types) {
+  # Get the FindMarkers results for the current cell type
+  markers <- markers_list[[cell_type]]
+  
+  # Add the "gene" column to markers
+  markers$gene <- rownames(markers)
+  
+  # Determine if expression is higher in Control or Disease
+  markers$Expression <- ifelse(markers$avg_log2FC > 0, "Higher in Control", "Higher in Disease")
+  
+  # Order the results by decreasing absolute value of log2 fold change
+  markers <- markers[order(abs(markers$avg_log2FC), decreasing = TRUE), ]
+  
+  # Filter genes with adjusted p-value less than 0.01/4
+  markers <- markers[markers$p_val_adj < 0.0025, ]
+  markers <- markers[abs(markers$avg_log2FC) >1, ]
+  
+  # Select the top differentially expressed genes
+  top_markers <- head(markers, n = 3000)
+  
+  # Store the results for the current cell type
+  results[[cell_type]] <- top_markers[, c("gene", "Expression", "avg_log2FC", "p_val", "p_val_adj")]
+}
+
+# Print the results for each cell type
+for (cell_type in cell_types) {
+  cat(paste0("\nTop differentially expressed genes in ", cell_type, " (adjusted p-value < 0.01):\n"))
+  print(results[[cell_type]])
+} 
+```
+
+
+```{r}
+# Print the counts of genes based on their expression pattern for each cell type
+for (cell_type in cell_types) {
+  cat(paste0("\nCounts of genes based on expression pattern in ", cell_type, ":\n"))
+  print(table(results[[cell_type]]$Expression))
+}
+```
+
+
+```{r}
+# Print the number of cells for each cell type
+cell_counts <- table(Idents(clusters_labeled_nonzero))
+print(cell_counts)
+```
+
+
+Cldn5, Endothelial cells
+```{r}
+# Extract the normalized expression data for Cldn5
+Cldn5_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Cldn5",]
+
+# Apply log transformation (log2(TPM + 1))
+Cldn5_expression_log <- log2(Cldn5_expression + 1)
+
+# Create a data frame with the log-transformed Cldn5 expression, condition, and cell type information
+Cldn5_data <- data.frame(
+  Expression = as.numeric(Cldn5_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Endothelial cells
+Cldn5_data_Endothelial <- Cldn5_data[Cldn5_data$CellType == "Endothelial cells", ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Cldn5_data_Endothelial$Condition <- factor(Cldn5_data_Endothelial$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Get the FindMarkers results for Endothelial cells
+endothelial_markers <- markers_list[["Endothelial cells"]]
+
+# Check if Cldn5 is present in the endothelial_markers data frame
+if ("Cldn5" %in% rownames(endothelial_markers)) {
+  cldn5_log2fc <- endothelial_markers["Cldn5", "avg_log2FC"]
+  cldn5_padj <- endothelial_markers["Cldn5", "p_val_adj"]
+  
+  expression_higher <- ifelse(cldn5_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Cldn5 =", format(cldn5_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(cldn5_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Endothelial cells
+  ggplot(Cldn5_data_Endothelial, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Cldn5 Expression"), title = "Cldn5 Expression in Endothelial Cells") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Cldn5 is not present in the differentially expressed genes for Endothelial cells.\n")
+}
+
+```
+
+Tjp1 (ZO-1), Endothelial cells
+```{r}
+# Extract the normalized expression data for Tjp1
+Tjp1_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Tjp1",]
+
+# Apply log transformation (log2(TPM + 1))
+Tjp1_expression_log <- log2(Tjp1_expression + 1)
+
+# Create a data frame with the log-transformed Tjp1 expression, condition, and cell type information
+Tjp1_data <- data.frame(
+  Expression = as.numeric(Tjp1_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Endothelial cells
+Tjp1_data_Endothelial <- Tjp1_data[Tjp1_data$CellType == "Endothelial cells", ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Tjp1_data_Endothelial$Condition <- factor(Tjp1_data_Endothelial$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Get the FindMarkers results for Endothelial cells
+endothelial_markers <- markers_list[["Endothelial cells"]]
+
+# Check if Tjp1 is present in the endothelial_markers data frame
+if ("Tjp1" %in% rownames(endothelial_markers)) {
+  Tjp1_log2fc <- endothelial_markers["Tjp1", "avg_log2FC"]
+  Tjp1_padj <- endothelial_markers["Tjp1", "p_val_adj"]
+  
+  expression_higher <- ifelse(Tjp1_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Tjp1 =", format(Tjp1_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Tjp1_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Endothelial cells
+  ggplot(Tjp1_data_Endothelial, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Tjp1 Expression"), title = "Tjp1 Expression in Endothelial Cells") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Tjp1 is not present in the differentially expressed genes for Endothelial cells.\n")
+}
+```
+
+Pecam1, Endothelial cells
+```{r}
+# Extract the normalized expression data for Pecam1
+Pecam1_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Pecam1",]
+
+# Apply log transformation (log2(TPM + 1))
+Pecam1_expression_log <- log2(Pecam1_expression + 1)
+
+# Create a data frame with the log-transformed Pecam1 expression, condition, and cell type information
+Pecam1_data <- data.frame(
+  Expression = as.numeric(Pecam1_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Endothelial cells
+Pecam1_data_Endothelial <- Pecam1_data[Pecam1_data$CellType == "Endothelial cells", ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Pecam1_data_Endothelial$Condition <- factor(Pecam1_data_Endothelial$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Get the FindMarkers results for Endothelial cells
+endothelial_markers <- markers_list[["Endothelial cells"]]
+
+# Check if Pecam1 is present in the endothelial_markers data frame
+if ("Pecam1" %in% rownames(endothelial_markers)) {
+  Pecam1_log2fc <- endothelial_markers["Pecam1", "avg_log2FC"]
+  Pecam1_padj <- endothelial_markers["Pecam1", "p_val_adj"]
+  
+  expression_higher <- ifelse(Pecam1_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Pecam1 =", format(Pecam1_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Pecam1_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Endothelial cells
+  ggplot(Pecam1_data_Endothelial, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Pecam1 Expression"), title = "Pecam1 Expression in Endothelial Cells") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Pecam1 is not present in the differentially expressed genes for Endothelial cells.\n")
+}
+
+```
+
+Cdh5 (VE-cadherin), ECs
+```{r}
+# Extract the normalized expression data for Cdh5
+Cdh5_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Cdh5",]
+
+# Apply log transformation (log2(TPM + 1))
+Cdh5_expression_log <- log2(Cdh5_expression + 1)
+
+# Create a data frame with the log-transformed Cdh5 expression, condition, and cell type information
+Cdh5_data <- data.frame(
+  Expression = as.numeric(Cdh5_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Endothelial cells
+Cdh5_data_Endothelial <- Cdh5_data[Cdh5_data$CellType == "Endothelial cells", ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Cdh5_data_Endothelial$Condition <- factor(Cdh5_data_Endothelial$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Get the FindMarkers results for Endothelial cells
+endothelial_markers <- markers_list[["Endothelial cells"]]
+
+# Check if Cdh5 is present in the endothelial_markers data frame
+if ("Cdh5" %in% rownames(endothelial_markers)) {
+  Cdh5_log2fc <- endothelial_markers["Cdh5", "avg_log2FC"]
+  Cdh5_padj <- endothelial_markers["Cdh5", "p_val_adj"]
+  
+  expression_higher <- ifelse(Cdh5_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Cdh5 =", format(Cdh5_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Cdh5_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Endothelial cells
+  ggplot(Cdh5_data_Endothelial, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Cdh5 Expression"), title = "Cdh5 Expression in Endothelial Cells") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Cdh5 is not present in the differentially expressed genes for Endothelial cells.\n")
+}
+```
+
+Ocln, Endothelial cells
+```{r}
+# Extract the normalized expression data for Ocln
+Ocln_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Ocln",]
+
+# Apply log transformation (log2(TPM + 1))
+Ocln_expression_log <- log2(Ocln_expression + 1)
+
+# Create a data frame with the log-transformed Ocln expression, condition, and cell type information
+Ocln_data <- data.frame(
+  Expression = as.numeric(Ocln_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Endothelial cells
+Ocln_data_Endothelial <- Ocln_data[Ocln_data$CellType == "Endothelial cells", ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Ocln_data_Endothelial$Condition <- factor(Ocln_data_Endothelial$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Get the FindMarkers results for Endothelial cells
+endothelial_markers <- markers_list[["Endothelial cells"]]
+
+# Check if Ocln is present in the endothelial_markers data frame
+if ("Ocln" %in% rownames(endothelial_markers)) {
+  Ocln_log2fc <- endothelial_markers["Ocln", "avg_log2FC"]
+  Ocln_padj <- endothelial_markers["Ocln", "p_val_adj"]
+  
+  expression_higher <- ifelse(Ocln_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Ocln =", format(Ocln_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Ocln_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Endothelial cells
+  ggplot(Ocln_data_Endothelial, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Ocln Expression"), title = "Ocln Expression in Endothelial Cells") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Ocln is not present in the differentially expressed genes for Endothelial cells.\n")
+}
+```
+
+Multi-comparison ECs
+```{r}
+# Combine the data frames for all genes and add a new column for the gene-condition combination
+combined_data <- rbind(
+  data.frame(Gene = "Cldn5", Condition_combined = paste("Cldn5", Cldn5_data_Endothelial$Condition), Cldn5_data_Endothelial),
+  data.frame(Gene = "Tjp1", Condition_combined = paste("Tjp1", Tjp1_data_Endothelial$Condition), Tjp1_data_Endothelial),
+  data.frame(Gene = "Pecam1", Condition_combined = paste("Pecam1", Pecam1_data_Endothelial$Condition), Pecam1_data_Endothelial),
+  data.frame(Gene = "Cdh5", Condition_combined = paste("Cdh5", Cdh5_data_Endothelial$Condition), Cdh5_data_Endothelial),
+  data.frame(Gene = "Ocln", Condition_combined = paste("Ocln", Ocln_data_Endothelial$Condition), Ocln_data_Endothelial)
+)
+
+# Define the order of the gene-condition combinations
+condition_order <- c("Cldn5 MTerm", "Cldn5 MNEC", "Tjp1 MTerm", "Tjp1 MNEC", "Pecam1 MTerm", "Pecam1 MNEC", "Cdh5 MTerm", "Cdh5 MNEC", "Ocln MTerm", "Ocln MNEC")
+
+# Create the violin plot
+ggplot(combined_data, aes(x = factor(Condition_combined, levels = condition_order), y = Expression, fill = Condition)) +
+  geom_violin(scale = "width", alpha = 0.7) +
+  labs(x = "Gene and Condition", y = expression(log[2](TPM + 1) ~ "Expression"), title = "Gene Expression in Endothelial Cells") +
+  theme_minimal() +
+  scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+  ylim(0, 3) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.title = element_blank(),
+        legend.position = "top")
+```
+
+Tjp1 nonzero, ECs
+```{r}
+# Extract the normalized expression data for Tjp1
+Tjp1_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Tjp1",]
+
+# Apply log transformation (log2(TPM + 1))
+Tjp1_expression_log <- log2(Tjp1_expression + 1)
+
+# Create a data frame with the log-transformed Tjp1 expression, condition, and cell type information
+Tjp1_data <- data.frame(
+  Expression = as.numeric(Tjp1_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Endothelial cells with nonzero Tjp1 expression
+Tjp1_data_Endothelial <- Tjp1_data[Tjp1_data$CellType == "Endothelial cells" & Tjp1_data$Expression > 0, ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Tjp1_data_Endothelial$Condition <- factor(Tjp1_data_Endothelial$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Perform Wilcoxon rank-sum test on Endothelial cells with nonzero Tjp1 expression
+wilcox_test_result <- wilcox.test(Expression ~ Condition, data = Tjp1_data_Endothelial)
+
+# Print the Wilcoxon test results
+print(wilcox_test_result)
+
+# Get the FindMarkers results for Endothelial cells
+endothelial_markers <- markers_list[["Endothelial cells"]]
+
+# Check if Tjp1 is present in the endothelial_markers data frame
+if ("Tjp1" %in% rownames(endothelial_markers)) {
+  Tjp1_log2fc <- endothelial_markers["Tjp1", "avg_log2FC"]
+  Tjp1_padj <- endothelial_markers["Tjp1", "p_val_adj"]
+  
+  expression_higher <- ifelse(Tjp1_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Tjp1 =", format(Tjp1_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Tjp1_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Endothelial cells with nonzero Tjp1 expression
+  ggplot(Tjp1_data_Endothelial, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Tjp1 Expression"), title = "Tjp1 Expression in Endothelial Cells (Nonzero)") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Tjp1 is not present in the differentially expressed genes for Endothelial cells.\n")
+}
+```
+
+
+Pecam 1 nonzero, ECs
+```{r}
+# Extract the normalized expression data for Pecam1
+Pecam1_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Pecam1",]
+
+# Apply log transformation (log2(TPM + 1))
+Pecam1_expression_log <- log2(Pecam1_expression + 1)
+
+# Create a data frame with the log-transformed Pecam1 expression, condition, and cell type information
+Pecam1_data <- data.frame(
+  Expression = as.numeric(Pecam1_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Endothelial cells with nonzero Pecam1 expression
+Pecam1_data_Endothelial <- Pecam1_data[Pecam1_data$CellType == "Endothelial cells" & Pecam1_data$Expression > 0, ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Pecam1_data_Endothelial$Condition <- factor(Pecam1_data_Endothelial$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Perform Wilcoxon rank-sum test on Endothelial cells with nonzero Pecam1 expression
+wilcox_test_result <- wilcox.test(Expression ~ Condition, data = Pecam1_data_Endothelial)
+
+# Print the Wilcoxon test results
+print(wilcox_test_result)
+
+# Get the FindMarkers results for Endothelial cells
+endothelial_markers <- markers_list[["Endothelial cells"]]
+
+# Check if Pecam1 is present in the endothelial_markers data frame
+if ("Pecam1" %in% rownames(endothelial_markers)) {
+  Pecam1_log2fc <- endothelial_markers["Pecam1", "avg_log2FC"]
+  Pecam1_padj <- endothelial_markers["Pecam1", "p_val_adj"]
+  
+  expression_higher <- ifelse(Pecam1_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Pecam1 =", format(Pecam1_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Pecam1_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Endothelial cells with nonzero Pecam1 expression
+  ggplot(Pecam1_data_Endothelial, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Pecam1 Expression"), title = "Pecam1 Expression in Endothelial Cells (Nonzero)") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Pecam1 is not present in the differentially expressed genes for Endothelial cells.\n")
+}
+```
+
+
+
+Cdh5 nonzero, ECs
+```{r}
+# Extract the normalized expression data for Cdh5
+Cdh5_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Cdh5",]
+
+# Apply log transformation (log2(TPM + 1))
+Cdh5_expression_log <- log2(Cdh5_expression + 1)
+
+# Create a data frame with the log-transformed Cdh5 expression, condition, and cell type information
+Cdh5_data <- data.frame(
+  Expression = as.numeric(Cdh5_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Endothelial cells with nonzero Cdh5 expression
+Cdh5_data_Endothelial <- Cdh5_data[Cdh5_data$CellType == "Endothelial cells" & Cdh5_data$Expression > 0, ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Cdh5_data_Endothelial$Condition <- factor(Cdh5_data_Endothelial$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Perform Wilcoxon rank-sum test on Endothelial cells with nonzero Cdh5 expression
+wilcox_test_result <- wilcox.test(Expression ~ Condition, data = Cdh5_data_Endothelial)
+
+# Print the Wilcoxon test results
+print(wilcox_test_result)
+
+# Get the FindMarkers results for Endothelial cells
+endothelial_markers <- markers_list[["Endothelial cells"]]
+
+# Check if Cdh5 is present in the endothelial_markers data frame
+if ("Cdh5" %in% rownames(endothelial_markers)) {
+  Cdh5_log2fc <- endothelial_markers["Cdh5", "avg_log2FC"]
+  Cdh5_padj <- endothelial_markers["Cdh5", "p_val_adj"]
+  
+  expression_higher <- ifelse(Cdh5_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Cdh5 =", format(Cdh5_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Cdh5_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Endothelial cells with nonzero Cdh5 expression
+  ggplot(Cdh5_data_Endothelial, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Cdh5 Expression"), title = "Cdh5 Expression in Endothelial Cells (Nonzero)") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Cdh5 is not present in the differentially expressed genes for Endothelial cells.\n")
+}
+```
+
+Tgfb1, Pericytes
+```{r}
+# Extract the normalized expression data for Tgfb1
+Tgfb1_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Tgfb1",]
+
+# Apply log transformation (log2(TPM + 1))
+Tgfb1_expression_log <- log2(Tgfb1_expression + 1)
+
+# Create a data frame with the log-transformed Tgfb1 expression, condition, and cell type information
+Tgfb1_data <- data.frame(
+  Expression = as.numeric(Tgfb1_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Pericytes
+Tgfb1_data_Pericytes <- Tgfb1_data[Tgfb1_data$CellType == "Pericytes", ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Tgfb1_data_Pericytes$Condition <- factor(Tgfb1_data_Pericytes$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Get the FindMarkers results for Pericytes
+Pericytes_markers <- markers_list[["Pericytes"]]
+
+# Check if Tgfb1 is present in the Pericytes_markers data frame
+if ("Tgfb1" %in% rownames(Pericytes_markers)) {
+  Tgfb1_log2fc <- Pericytes_markers["Tgfb1", "avg_log2FC"]
+  Tgfb1_padj <- Pericytes_markers["Tgfb1", "p_val_adj"]
+  
+  expression_higher <- ifelse(Tgfb1_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Tgfb1 =", format(Tgfb1_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Tgfb1_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Pericytes
+  ggplot(Tgfb1_data_Pericytes, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Tgfb1 Expression"), title = "Tgfb1 Expression in Pericytes") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Tgfb1 is not present in the differentially expressed genes for Pericytes.\n")
+}
+```
+
+Rgs5, Pericytes
+```{r}
+# Extract the normalized expression data for Rgs5
+Rgs5_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Rgs5",]
+
+# Apply log transformation (log2(TPM + 1))
+Rgs5_expression_log <- log2(Rgs5_expression + 1)
+
+# Create a data frame with the log-transformed Rgs5 expression, condition, and cell type information
+Rgs5_data <- data.frame(
+  Expression = as.numeric(Rgs5_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Pericytes
+Rgs5_data_Pericytes <- Rgs5_data[Rgs5_data$CellType == "Pericytes", ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Rgs5_data_Pericytes$Condition <- factor(Rgs5_data_Pericytes$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Get the FindMarkers results for Pericytes
+Pericytes_markers <- markers_list[["Pericytes"]]
+
+# Check if Rgs5 is present in the Pericytes_markers data frame
+if ("Rgs5" %in% rownames(Pericytes_markers)) {
+  Rgs5_log2fc <- Pericytes_markers["Rgs5", "avg_log2FC"]
+  Rgs5_padj <- Pericytes_markers["Rgs5", "p_val_adj"]
+  
+  expression_higher <- ifelse(Rgs5_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Rgs5 =", format(Rgs5_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Rgs5_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Pericytes
+  ggplot(Rgs5_data_Pericytes, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Rgs5 Expression"), title = "Rgs5 Expression in Pericytes") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Rgs5 is not present in the differentially expressed genes for Pericytes.\n")
+}
+
+```
+
+Angpt1, Pericytes
+```{r}
+# Extract the normalized expression data for Angpt1
+Angpt1_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Angpt1",]
+
+# Apply log transformation (log2(TPM + 1))
+Angpt1_expression_log <- log2(Angpt1_expression + 1)
+
+# Create a data frame with the log-transformed Angpt1 expression, condition, and cell type information
+Angpt1_data <- data.frame(
+  Expression = as.numeric(Angpt1_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Pericytes
+Angpt1_data_Pericytes <- Angpt1_data[Angpt1_data$CellType == "Pericytes", ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Angpt1_data_Pericytes$Condition <- factor(Angpt1_data_Pericytes$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Get the FindMarkers results for Pericytes
+Pericytes_markers <- markers_list[["Pericytes"]]
+
+# Check if Angpt1 is present in the Pericytes_markers data frame
+if ("Angpt1" %in% rownames(Pericytes_markers)) {
+  Angpt1_log2fc <- Pericytes_markers["Angpt1", "avg_log2FC"]
+  Angpt1_padj <- Pericytes_markers["Angpt1", "p_val_adj"]
+  
+  expression_higher <- ifelse(Angpt1_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Angpt1 =", format(Angpt1_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Angpt1_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Pericytes
+  ggplot(Angpt1_data_Pericytes, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Angpt1 Expression"), title = "Angpt1 Expression in Pericytes") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Angpt1 is not present in the differentially expressed genes for Pericytes.\n")
+}
+
+```
+
+Angpt2, Pericytes
+```{r}
+# Extract the normalized expression data for Angpt2
+Angpt2_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Angpt2",]
+
+# Apply log transformation (log2(TPM + 1))
+Angpt2_expression_log <- log2(Angpt2_expression + 1)
+
+# Create a data frame with the log-transformed Angpt2 expression, condition, and cell type information
+Angpt2_data <- data.frame(
+  Expression = as.numeric(Angpt2_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Pericytes
+Angpt2_data_Pericytes <- Angpt2_data[Angpt2_data$CellType == "Pericytes", ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Angpt2_data_Pericytes$Condition <- factor(Angpt2_data_Pericytes$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Get the FindMarkers results for Pericytes
+Pericytes_markers <- markers_list[["Pericytes"]]
+
+# Check if Angpt2 is present in the Pericytes_markers data frame
+if ("Angpt2" %in% rownames(Pericytes_markers)) {
+  Angpt2_log2fc <- Pericytes_markers["Angpt2", "avg_log2FC"]
+  Angpt2_padj <- Pericytes_markers["Angpt2", "p_val_adj"]
+  
+  expression_higher <- ifelse(Angpt2_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Angpt2 =", format(Angpt2_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Angpt2_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Pericytes
+  ggplot(Angpt2_data_Pericytes, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Angpt2 Expression"), title = "Angpt2 Expression in Pericytes") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Angpt2 is not present in the differentially expressed genes for Pericytes.\n")
+}
+
+```
+
+Multi-comparison, Pericytes
+```{r}
+# Combine the data frames for all genes and add a new column for the gene-condition combination
+combined_data <- rbind(
+  data.frame(Gene = "Tgfb1", Condition_combined = paste("Tgfb1", Tgfb1_data_Pericytes$Condition), Tgfb1_data_Pericytes),
+  data.frame(Gene = "Rgs5", Condition_combined = paste("Rgs5", Rgs5_data_Pericytes$Condition), Rgs5_data_Pericytes),
+  data.frame(Gene = "Angpt1", Condition_combined = paste("Angpt1", Angpt1_data_Pericytes$Condition), Angpt1_data_Pericytes)
+)
+
+# Define the order of the gene-condition combinations
+condition_order <- c("Tgfb1 MTerm", "Tgfb1 MNEC", "Rgs5 MTerm", "Rgs5 MNEC", "Angpt1 MTerm", "Angpt1 MNEC")
+
+# Create the violin plot
+ggplot(combined_data, aes(x = factor(Condition_combined, levels = condition_order), y = Expression, fill = Condition)) +
+  geom_violin(scale = "width", alpha = 0.7) +
+  labs(x = "Gene and Condition", y = expression(log[2](TPM + 1) ~ "Expression"), title = "Gene Expression in Pericytes") +
+  theme_minimal() +
+  scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+  ylim(0, 3) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.title = element_blank(),
+        legend.position = "top")
+```
+
+Tgfb1 nonzero, Pericytes
+```{r}
+# Extract the normalized expression data for Tgfb1
+Tgfb1_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Tgfb1",]
+
+# Apply log transformation (log2(TPM + 1))
+Tgfb1_expression_log <- log2(Tgfb1_expression + 1)
+
+# Create a data frame with the log-transformed Tgfb1 expression, condition, and cell type information
+Tgfb1_data <- data.frame(
+  Expression = as.numeric(Tgfb1_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Pericytes with nonzero Tgfb1 expression
+Tgfb1_data_Pericytes <- Tgfb1_data[Tgfb1_data$CellType == "Pericytes" & Tgfb1_data$Expression > 0, ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Tgfb1_data_Pericytes$Condition <- factor(Tgfb1_data_Pericytes$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Perform Wilcoxon rank-sum test on Pericytes with nonzero Tgfb1 expression
+wilcox_test_result <- wilcox.test(Expression ~ Condition, data = Tgfb1_data_Pericytes)
+
+# Print the Wilcoxon test results
+print(wilcox_test_result)
+
+# Get the FindMarkers results for Pericytes
+Pericytes_markers <- markers_list[["Pericytes"]]
+
+# Check if Tgfb1 is present in the Pericytes_markers data frame
+if ("Tgfb1" %in% rownames(Pericytes_markers)) {
+  Tgfb1_log2fc <- Pericytes_markers["Tgfb1", "avg_log2FC"]
+  Tgfb1_padj <- Pericytes_markers["Tgfb1", "p_val_adj"]
+  
+  expression_higher <- ifelse(Tgfb1_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Tgfb1 =", format(Tgfb1_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Tgfb1_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Pericytes with nonzero Tgfb1 expression
+  ggplot(Tgfb1_data_Pericytes, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Tgfb1 Expression"), title = "Tgfb1 Expression in Pericytes (Nonzero)") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Tgfb1 is not present in the differentially expressed genes for Pericytes.\n")
+}
+```
+
+Rgs5 nonzero, Pericytes
+```{r}
+# Extract the normalized expression data for Rgs5
+Rgs5_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Rgs5",]
+
+# Apply log transformation (log2(TPM + 1))
+Rgs5_expression_log <- log2(Rgs5_expression + 1)
+
+# Create a data frame with the log-transformed Rgs5 expression, condition, and cell type information
+Rgs5_data <- data.frame(
+  Expression = as.numeric(Rgs5_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Pericytes with nonzero Rgs5 expression
+Rgs5_data_Pericytes <- Rgs5_data[Rgs5_data$CellType == "Pericytes" & Rgs5_data$Expression > 0, ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Rgs5_data_Pericytes$Condition <- factor(Rgs5_data_Pericytes$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Perform Wilcoxon rank-sum test on Pericytes with nonzero Rgs5 expression
+wilcox_test_result <- wilcox.test(Expression ~ Condition, data = Rgs5_data_Pericytes)
+
+# Print the Wilcoxon test results
+print(wilcox_test_result)
+
+# Get the FindMarkers results for Pericytes
+Pericytes_markers <- markers_list[["Pericytes"]]
+
+# Check if Rgs5 is present in the Pericytes_markers data frame
+if ("Rgs5" %in% rownames(Pericytes_markers)) {
+  Rgs5_log2fc <- Pericytes_markers["Rgs5", "avg_log2FC"]
+  Rgs5_padj <- Pericytes_markers["Rgs5", "p_val_adj"]
+  
+  expression_higher <- ifelse(Rgs5_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Rgs5 =", format(Rgs5_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Rgs5_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Pericytes with nonzero Rgs5 expression
+  ggplot(Rgs5_data_Pericytes, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Rgs5 Expression"), title = "Rgs5 Expression in Pericytes (Nonzero)") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Rgs5 is not present in the differentially expressed genes for Pericytes.\n")
+}
+```
+
+Ddx3y, Astrocytes
+```{r}
+# Extract the normalized expression data for Ddx3y
+Ddx3y_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Ddx3y",]
+
+# Apply log transformation (log2(TPM + 1))
+Ddx3y_expression_log <- log2(Ddx3y_expression + 1)
+
+# Create a data frame with the log-transformed Ddx3y expression, condition, and cell type information
+Ddx3y_data <- data.frame(
+  Expression = as.numeric(Ddx3y_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Astrocytes
+Ddx3y_data_Astrocytes <- Ddx3y_data[Ddx3y_data$CellType == "Astrocytes", ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Ddx3y_data_Astrocytes$Condition <- factor(Ddx3y_data_Astrocytes$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Get the FindMarkers results for Astrocytes
+Astrocytes_markers <- markers_list[["Astrocytes"]]
+
+# Check if Ddx3y is present in the Astrocytes_markers data frame
+if ("Ddx3y" %in% rownames(Astrocytes_markers)) {
+  Ddx3y_log2fc <- Astrocytes_markers["Ddx3y", "avg_log2FC"]
+  Ddx3y_padj <- Astrocytes_markers["Ddx3y", "p_val_adj"]
+  
+  expression_higher <- ifelse(Ddx3y_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Ddx3y =", format(Ddx3y_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Ddx3y_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Astrocytes
+  ggplot(Ddx3y_data_Astrocytes, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Ddx3y Expression"), title = "Ddx3y Expression in Astrocytes") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Ddx3y is not present in the differentially expressed genes for Astrocytes.\n")
+}
+```
+
+Aqp4, Astrocytes
+```{r}
+# Extract the normalized expression data for Aqp4
+Aqp4_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Aqp4",]
+
+# Apply log transformation (log2(TPM + 1))
+Aqp4_expression_log <- log2(Aqp4_expression + 1)
+
+# Create a data frame with the log-transformed Aqp4 expression, condition, and cell type information
+Aqp4_data <- data.frame(
+  Expression = as.numeric(Aqp4_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Astrocytes
+Aqp4_data_Astrocytes <- Aqp4_data[Aqp4_data$CellType == "Astrocytes", ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Aqp4_data_Astrocytes$Condition <- factor(Aqp4_data_Astrocytes$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Get the FindMarkers results for Astrocytes
+Astrocytes_markers <- markers_list[["Astrocytes"]]
+
+# Check if Aqp4 is present in the Astrocytes_markers data frame
+if ("Aqp4" %in% rownames(Astrocytes_markers)) {
+  Aqp4_log2fc <- Astrocytes_markers["Aqp4", "avg_log2FC"]
+  Aqp4_padj <- Astrocytes_markers["Aqp4", "p_val_adj"]
+  
+  expression_higher <- ifelse(Aqp4_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Aqp4 =", format(Aqp4_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Aqp4_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Astrocytes
+  ggplot(Aqp4_data_Astrocytes, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Aqp4 Expression"), title = "Aqp4 Expression in Astrocytes") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Aqp4 is not present in the differentially expressed genes for Astrocytes.\n")
+}
+```
+
+
+
+
+
+S100b, Astrocytes
+```{r}
+# Extract the normalized expression data for S100b
+S100b_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["S100b",]
+
+# Apply log transformation (log2(TPM + 1))
+S100b_expression_log <- log2(S100b_expression + 1)
+
+# Create a data frame with the log-transformed S100b expression, condition, and cell type information
+S100b_data <- data.frame(
+  Expression = as.numeric(S100b_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Astrocytes
+S100b_data_Astrocytes <- S100b_data[S100b_data$CellType == "Astrocytes", ]
+
+# Rename the levels of the Condition variable to be more meaningful
+S100b_data_Astrocytes$Condition <- factor(S100b_data_Astrocytes$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Get the FindMarkers results for Astrocytes
+Astrocytes_markers <- markers_list[["Astrocytes"]]
+
+# Check if S100b is present in the Astrocytes_markers data frame
+if ("S100b" %in% rownames(Astrocytes_markers)) {
+  S100b_log2fc <- Astrocytes_markers["S100b", "avg_log2FC"]
+  S100b_padj <- Astrocytes_markers["S100b", "p_val_adj"]
+  
+  expression_higher <- ifelse(S100b_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for S100b =", format(S100b_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(S100b_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Astrocytes
+  ggplot(S100b_data_Astrocytes, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "S100b Expression"), title = "S100b Expression in Astrocytes") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("S100b is not present in the differentially expressed genes for Astrocytes.\n")
+}
+
+```
+
+S100b nonzero, Astrocytes
+```{r}
+# Extract the normalized expression data for S100b
+S100b_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["S100b",]
+
+# Apply log transformation (log2(TPM + 1))
+S100b_expression_log <- log2(S100b_expression + 1)
+
+# Create a data frame with the log-transformed S100b expression, condition, and cell type information
+S100b_data <- data.frame(
+  Expression = as.numeric(S100b_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Astrocytes with nonzero S100b expression
+S100b_data_Astrocytes <- S100b_data[S100b_data$CellType == "Astrocytes" & S100b_data$Expression > 0, ]
+
+# Rename the levels of the Condition variable to be more meaningful
+S100b_data_Astrocytes$Condition <- factor(S100b_data_Astrocytes$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Perform Wilcoxon rank-sum test on Astrocytes with nonzero S100b expression
+wilcox_test_result <- wilcox.test(Expression ~ Condition, data = S100b_data_Astrocytes)
+
+# Print the Wilcoxon test results
+print(wilcox_test_result)
+
+# Get the FindMarkers results for Astrocytes
+Astrocytes_markers <- markers_list[["Astrocytes"]]
+
+# Check if S100b is present in the Astrocytes_markers data frame
+if ("S100b" %in% rownames(Astrocytes_markers)) {
+  S100b_log2fc <- Astrocytes_markers["S100b", "avg_log2FC"]
+  S100b_padj <- Astrocytes_markers["S100b", "p_val_adj"]
+  
+  expression_higher <- ifelse(S100b_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for S100b =", format(S100b_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(S100b_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Astrocytes with nonzero S100b expression
+  ggplot(S100b_data_Astrocytes, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "S100b Expression"), title = "S100b Expression in Astrocytes (Nonzero)") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("S100b is not present in the differentially expressed genes for Astrocytes.\n")
+}
+```
+
+Il16, Microglia
+```{r}
+# Extract the normalized expression data for Il16
+Il16_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Il16",]
+
+# Apply log transformation (log2(TPM + 1))
+Il16_expression_log <- log2(Il16_expression + 1)
+
+# Create a data frame with the log-transformed Il16 expression, condition, and cell type information
+Il16_data <- data.frame(
+  Expression = as.numeric(Il16_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Microglia
+Il16_data_Microglia <- Il16_data[Il16_data$CellType == "Microglia", ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Il16_data_Microglia$Condition <- factor(Il16_data_Microglia$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Get the FindMarkers results for Microglia
+Microglia_markers <- markers_list[["Microglia"]]
+
+# Check if Il16 is present in the Microglia_markers data frame
+if ("Il16" %in% rownames(Microglia_markers)) {
+  Il16_log2fc <- Microglia_markers["Il16", "avg_log2FC"]
+  Il16_padj <- Microglia_markers["Il16", "p_val_adj"]
+  
+  expression_higher <- ifelse(Il16_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Il16 =", format(Il16_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Il16_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Microglia
+  ggplot(Il16_data_Microglia, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Il16 Expression"), title = "Il16 Expression in Microglia") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Il16 is not present in the differentially expressed genes for Microglia.\n")
+}
+
+```
+
+Il16 nonzero, Microglia
+```{r}
+# Extract the normalized expression data for Il16
+Il16_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Il16",]
+
+# Apply log transformation (log2(TPM + 1))
+Il16_expression_log <- log2(Il16_expression + 1)
+
+# Create a data frame with the log-transformed Il16 expression, condition, and cell type information
+Il16_data <- data.frame(
+  Expression = as.numeric(Il16_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Microglia with nonzero Il16 expression
+Il16_data_Microglia <- Il16_data[Il16_data$CellType == "Microglia" & Il16_data$Expression > 0, ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Il16_data_Microglia$Condition <- factor(Il16_data_Microglia$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Perform Wilcoxon rank-sum test on Microglia with nonzero Il16 expression
+wilcox_test_result <- wilcox.test(Expression ~ Condition, data = Il16_data_Microglia)
+
+# Print the Wilcoxon test results
+print(wilcox_test_result)
+
+# Get the FindMarkers results for Microglia
+Microglia_markers <- markers_list[["Microglia"]]
+
+# Check if Il16 is present in the Microglia_markers data frame
+if ("Il16" %in% rownames(Microglia_markers)) {
+  Il16_log2fc <- Microglia_markers["Il16", "avg_log2FC"]
+  Il16_padj <- Microglia_markers["Il16", "p_val_adj"]
+  
+  expression_higher <- ifelse(Il16_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Il16 =", format(Il16_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Il16_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Microglia with nonzero Il16 expression
+  ggplot(Il16_data_Microglia, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Il16 Expression"), title = "Il16 Expression in Microglia (Nonzero)") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Il16 is not present in the differentially expressed genes for Microglia.\n")
+}
+```
+
+Il1b, Microglia 
+```{r}
+# Extract the normalized expression data for Il1b
+Il1b_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Il1b",]
+
+# Apply log transformation (log2(TPM + 1))
+Il1b_expression_log <- log2(Il1b_expression + 1)
+
+# Create a data frame with the log-transformed Il1b expression, condition, and cell type information
+Il1b_data <- data.frame(
+  Expression = as.numeric(Il1b_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Microglia
+Il1b_data_Microglia <- Il1b_data[Il1b_data$CellType == "Microglia", ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Il1b_data_Microglia$Condition <- factor(Il1b_data_Microglia$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Get the FindMarkers results for Microglia
+Microglia_markers <- markers_list[["Microglia"]]
+
+# Check if Il1b is present in the Microglia_markers data frame
+if ("Il1b" %in% rownames(Microglia_markers)) {
+  Il1b_log2fc <- Microglia_markers["Il1b", "avg_log2FC"]
+  Il1b_padj <- Microglia_markers["Il1b", "p_val_adj"]
+  
+  expression_higher <- ifelse(Il1b_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Il1b =", format(Il1b_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Il1b_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Microglia
+  ggplot(Il1b_data_Microglia, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Il1b Expression"), title = "Il1b Expression in Microglia") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Il1b is not present in the differentially expressed genes for Microglia.\n")
+}
+```
+
+Tnf, Microglia
+```{r}
+# Extract the normalized expression data for Tnf
+Tnf_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Tnf",]
+
+# Apply log transformation (log2(TPM + 1))
+Tnf_expression_log <- log2(Tnf_expression + 1)
+
+# Create a data frame with the log-transformed Tnf expression, condition, and cell type information
+Tnf_data <- data.frame(
+  Expression = as.numeric(Tnf_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Microglia
+Tnf_data_Microglia <- Tnf_data[Tnf_data$CellType == "Microglia", ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Tnf_data_Microglia$Condition <- factor(Tnf_data_Microglia$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Get the FindMarkers results for Microglia
+Microglia_markers <- markers_list[["Microglia"]]
+
+# Check if Tnf is present in the Microglia_markers data frame
+if ("Tnf" %in% rownames(Microglia_markers)) {
+  Tnf_log2fc <- Microglia_markers["Tnf", "avg_log2FC"]
+  Tnf_padj <- Microglia_markers["Tnf", "p_val_adj"]
+  
+  expression_higher <- ifelse(Tnf_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Tnf =", format(Tnf_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Tnf_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Microglia
+  ggplot(Tnf_data_Microglia, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Tnf Expression"), title = "Tnf Expression in Microglia") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Tnf is not present in the differentially expressed genes for Microglia.\n")
+}
+
+```
+
+Tnf nonzero, Microglia
+```{r}
+# Extract the normalized expression data for Tnf
+Tnf_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Tnf",]
+
+# Apply log transformation (log2(TPM + 1))
+Tnf_expression_log <- log2(Tnf_expression + 1)
+
+# Create a data frame with the log-transformed Tnf expression, condition, and cell type information
+Tnf_data <- data.frame(
+  Expression = as.numeric(Tnf_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Microglia with nonzero Tnf expression
+Tnf_data_Microglia <- Tnf_data[Tnf_data$CellType == "Microglia" & Tnf_data$Expression > 0, ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Tnf_data_Microglia$Condition <- factor(Tnf_data_Microglia$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Perform Wilcoxon rank-sum test on Microglia with nonzero Tnf expression
+wilcox_test_result <- wilcox.test(Expression ~ Condition, data = Tnf_data_Microglia)
+
+# Print the Wilcoxon test results
+print(wilcox_test_result)
+
+# Get the FindMarkers results for Microglia
+Microglia_markers <- markers_list[["Microglia"]]
+
+# Check if Tnf is present in the Microglia_markers data frame
+if ("Tnf" %in% rownames(Microglia_markers)) {
+  Tnf_log2fc <- Microglia_markers["Tnf", "avg_log2FC"]
+  Tnf_padj <- Microglia_markers["Tnf", "p_val_adj"]
+  
+  expression_higher <- ifelse(Tnf_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Tnf =", format(Tnf_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Tnf_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Microglia with nonzero Tnf expression
+  ggplot(Tnf_data_Microglia, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Tnf Expression"), title = "Tnf Expression in Microglia (Nonzero)") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Tnf is not present in the differentially expressed genes for Microglia.\n")
+}
+```
+
+Aif1 (Iba1), Microglia
+```{r}
+# Extract the normalized expression data for Aif1
+Aif1_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Aif1",]
+
+# Apply log transformation (log2(TPM + 1))
+Aif1_expression_log <- log2(Aif1_expression + 1)
+
+# Create a data frame with the log-transformed Aif1 expression, condition, and cell type information
+Aif1_data <- data.frame(
+  Expression = as.numeric(Aif1_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Microglia
+Aif1_data_Microglia <- Aif1_data[Aif1_data$CellType == "Microglia", ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Aif1_data_Microglia$Condition <- factor(Aif1_data_Microglia$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Get the FindMarkers results for Microglia
+Microglia_markers <- markers_list[["Microglia"]]
+
+# Check if Aif1 is present in the Microglia_markers data frame
+if ("Aif1" %in% rownames(Microglia_markers)) {
+  Aif1_log2fc <- Microglia_markers["Aif1", "avg_log2FC"]
+  Aif1_padj <- Microglia_markers["Aif1", "p_val_adj"]
+  
+  expression_higher <- ifelse(Aif1_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Aif1 =", format(Aif1_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Aif1_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Microglia
+  ggplot(Aif1_data_Microglia, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Aif1 Expression"), title = "Aif1 Expression in Microglia") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Aif1 is not present in the differentially expressed genes for Microglia.\n")
+}
+
+```
+
+Tlr4, Microglia
+```{r}
+# Extract the normalized expression data for Tlr4
+Tlr4_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Tlr4",]
+
+# Apply log transformation (log2(TPM + 1))
+Tlr4_expression_log <- log2(Tlr4_expression + 1)
+
+# Create a data frame with the log-transformed Tlr4 expression, condition, and cell type information
+Tlr4_data <- data.frame(
+  Expression = as.numeric(Tlr4_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Microglia
+Tlr4_data_Microglia <- Tlr4_data[Tlr4_data$CellType == "Microglia", ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Tlr4_data_Microglia$Condition <- factor(Tlr4_data_Microglia$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Get the FindMarkers results for Microglia
+Microglia_markers <- markers_list[["Microglia"]]
+
+# Check if Tlr4 is present in the Microglia_markers data frame
+if ("Tlr4" %in% rownames(Microglia_markers)) {
+  Tlr4_log2fc <- Microglia_markers["Tlr4", "avg_log2FC"]
+  Tlr4_padj <- Microglia_markers["Tlr4", "p_val_adj"]
+  
+  expression_higher <- ifelse(Tlr4_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Tlr4 =", format(Tlr4_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Tlr4_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Microglia
+  ggplot(Tlr4_data_Microglia, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Tlr4 Expression"), title = "Tlr4 Expression in Microglia") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Tlr4 is not present in the differentially expressed genes for Microglia.\n")
+}
+
+```
+
+Tlr4 nonzero, Microglia
+```{r}
+# Extract the normalized expression data for Tlr4
+Tlr4_expression <- GetAssayData(clusters_labeled_nonzero, assay = "RNA", slot = "data")["Tlr4",]
+
+# Apply log transformation (log2(TPM + 1))
+Tlr4_expression_log <- log2(Tlr4_expression + 1)
+
+# Create a data frame with the log-transformed Tlr4 expression, condition, and cell type information
+Tlr4_data <- data.frame(
+  Expression = as.numeric(Tlr4_expression_log),
+  Condition = clusters_labeled_nonzero$stim,
+  CellType = Idents(clusters_labeled_nonzero)
+)
+
+# Filter the data frame to include only Microglia with nonzero Tlr4 expression
+Tlr4_data_Microglia <- Tlr4_data[Tlr4_data$CellType == "Microglia" & Tlr4_data$Expression > 0, ]
+
+# Rename the levels of the Condition variable to be more meaningful
+Tlr4_data_Microglia$Condition <- factor(Tlr4_data_Microglia$Condition, levels = c("Control", "Disease"), labels = c("MTerm", "MNEC"))
+
+# Perform Wilcoxon rank-sum test on Microglia with nonzero Tlr4 expression
+wilcox_test_result <- wilcox.test(Expression ~ Condition, data = Tlr4_data_Microglia)
+
+# Print the Wilcoxon test results
+print(wilcox_test_result)
+
+# Get the FindMarkers results for Microglia
+Microglia_markers <- markers_list[["Microglia"]]
+
+# Check if Tlr4 is present in the Microglia_markers data frame
+if ("Tlr4" %in% rownames(Microglia_markers)) {
+  Tlr4_log2fc <- Microglia_markers["Tlr4", "avg_log2FC"]
+  Tlr4_padj <- Microglia_markers["Tlr4", "p_val_adj"]
+  
+  expression_higher <- ifelse(Tlr4_log2fc > 0, "MTerm", "MNEC")
+  
+  print(paste("Expression is higher in", expression_higher))
+  print(paste("Log2 fold change for Tlr4 =", format(Tlr4_log2fc, digits = 3)))
+  print(paste("Adjusted p-value =", format(Tlr4_padj, digits = 3, scientific = TRUE)))
+
+  # Create a violin plot with box and whiskers plots for Microglia with nonzero Tlr4 expression
+  ggplot(Tlr4_data_Microglia, aes(x = Condition, y = Expression, fill = Condition)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    labs(x = "Condition", y = expression(log[2](TPM + 1) ~ "Tlr4 Expression"), title = "Tlr4 Expression in Microglia (Nonzero)") +
+    theme_minimal() +
+    scale_fill_manual(values = c("MTerm" = "lightblue", "MNEC" = "lightpink")) +
+    ylim(0, 3) 
+} else {
+  cat("Tlr4 is not present in the differentially expressed genes for Microglia.\n")
+}
+```
+
